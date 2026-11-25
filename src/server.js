@@ -56,6 +56,9 @@ async function gracefulShutdown(signal) {
 
   try {
     if (server) {
+      if (typeof server.closeIdleConnections === 'function') {
+        server.closeIdleConnections();
+      }
       await new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       });

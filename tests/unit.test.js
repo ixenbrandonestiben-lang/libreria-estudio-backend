@@ -32,6 +32,13 @@ seedModuleCache('../src/config/env', {
     nodeEnv: 'test',
     isProduction: false,
     isTest: true,
+    db: {
+      host: '127.0.0.1',
+      port: 3306,
+      name: 'libreria_estudio',
+      user: 'libreria_user',
+      password: ''
+    },
     mail: { from: 'test@libreria.local' },
     reservations: { ttlMinutes: 20 }
   },
@@ -460,5 +467,209 @@ describe('schoolListService.js - normalization and classification', () => {
       notFound: 1,
       estimatedSubtotal: '108.00'
     });
+  });
+});
+
+describe('env.js - configuration validation', () => {
+  it('allows local development startup without .env and enforces strict checks in production', () => {
+    const dotenvPath = (() => {
+      try {
+        return require.resolve('dotenv');
+      } catch {
+        return null;
+      }
+    })();
+
+    const fakeDotenvId = dotenvPath || '/virtual/dotenv/index.js';
+    const Module = require('node:module');
+    const originalResolve = Module._resolveFilename;
+    const prevDotenvCache = require.cache[fakeDotenvId];
+    const envFilePath = require.resolve('../src/config/env');
+    const prevEnvCache = require.cache[envFilePath];
+    const savedEnv = { ...process.env };
+
+    Module._resolveFilename = function patchedResolve(request, parent, isMain, options) {
+      if (request === 'dotenv' && !dotenvPath) {
+        return fakeDotenvId;
+      }
+      return originalResolve.call(this, request, parent, isMain, options);
+    };
+
+    require.cache[fakeDotenvId] = {
+      id: fakeDotenvId,
+      filename: fakeDotenvId,
+      loaded: true,
+      exports: { config: () => ({}) }
+    };
+
+    try {
+      // Development without DB_NAME / DB_USER / JWT_SECRET
+      delete process.env.NODE_ENV;
+      delete process.env.DB_NAME;
+      delete process.env.DB_USER;
+      delete process.env.DB_PASSWORD;
+      delete process.env.JWT_SECRET;
+      delete process.env.CORS_ORIGIN;
+      delete require.cache[envFilePath];
+
+      const devLoaded = require('../src/config/env');
+      assert.equal(devLoaded.env.nodeEnv, 'development');
+      assert.equal(devLoaded.env.db.name, 'libreria_estudio');
+      assert.equal(devLoaded.env.db.user, 'libreria_user');
+      assert.ok(devLoaded.env.jwt.secret.length >= 32);
+
+      // Production with CHANGE_ME placeholders must throw
+      process.env.NODE_ENV = 'production';
+      process.env.DB_NAME = 'libreria_estudio';
+      process.env.DB_USER = 'libreria_user';
+      process.env.DB_PASSWORD = 'CHANGE_ME_STRONG_DB_PASSWORD';
+      process.env.JWT_SECRET = 'CHANGE_ME_MIN_64_CHARS_RANDOM_HEX';
+      process.env.CORS_ORIGIN = '*';
+      assert.throws(() => devLoaded.validateEnv(), /Error de configuración de entorno/);
+
+      // Production with valid config passes
+      process.env.DB_PASSWORD = 'RealStrongDbPassword123!';
+      process.env.JWT_SECRET = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6';
+      process.env.CORS_ORIGIN = 'http://localhost:8080';
+      assert.doesNotThrow(() => devLoaded.validateEnv());
+    } finally {
+      Module._resolveFilename = originalResolve;
+      for (const k of Object.keys(process.env)) {
+        if (!(k in savedEnv)) {
+          delete process.env[k];
+        }
+      }
+      Object.assign(process.env, savedEnv);
+      if (prevDotenvCache) {
+        require.cache[fakeDotenvId] = prevDotenvCache;
+      } else {
+        delete require.cache[fakeDotenvId];
+      }
+      if (prevEnvCache) {
+        require.cache[envFilePath] = prevEnvCache;
+      } else {
+        delete require.cache[envFilePath];
+      }
+    }
+  });
+});
+
+describe('sqlRunner.js - SQL parsing and database directory integrity', () => {
+  it('splitSqlStatements splits statements accurately while preserving quoted semicolons', () => {
+    const fakeMysqlId = '/virtual/mysql2/promise.js';
+    const Module = require('node:module');
+    const originalResolve = Module._resolveFilename;
+    Module._resolveFilename = function patchedResolve(request, parent, isMain, options) {
+      if (request === 'mysql2/promise') {
+        return fakeMysqlId;
+      }
+      return originalResolve.call(this, request, parent, isMain, options);
+    };
+    require.cache[fakeMysqlId] = {
+      id: fakeMysqlId,
+      filename: fakeMysqlId,
+      loaded: true,
+      exports: { createConnection: async () => ({}) }
+    };
+
+    try {
+      const { splitSqlStatements, readSqlDirectory } = require('../src/db/sqlRunner');
+      const stmts = splitSqlStatements(`
+        -- Comentario con ; punto y coma
+        SET NAMES utf8mb4;
+        INSERT INTO faq_items (question) VALUES ('¿Funciona; bien?');
+        /* bloque ; comentario */
+        CREATE INDEX idx_test ON items (id);
+      `);
+      assert.equal(stmts.length, 3);
+      assert.equal(stmts[0], 'SET NAMES utf8mb4');
+      assert.match(stmts[1], /'¿Funciona; bien\?'/);
+      assert.equal(stmts[2], 'CREATE INDEX idx_test ON items (id)');
+
+      const migrations = readSqlDirectory('migrations');
+      const seeds = readSqlDirectory('seeds');
+      assert.equal(migrations.length, 6);
+      assert.equal(seeds.length, 3);
+    } finally {
+      Module._resolveFilename = originalResolve;
+      delete require.cache[fakeMysqlId];
+    }
+  });
+
+  it('runMigrations applies pending migrations idempotently and runSeeds executes seed scripts', async () => {
+    const fakeMysqlId = '/virtual/mysql2/promise-migrate.js';
+    const Module = require('node:module');
+    const originalResolve = Module._resolveFilename;
+
+    const executedSql = [];
+    const insertedMigrations = [];
+    let ended = false;
+
+    const fakeConn = {
+      async query(sql) {
+        executedSql.push(sql);
+        if (sql === 'SELECT filename FROM schema_migrations') {
+          return [[{ filename: '001_create_users_and_addresses.sql' }]];
+        }
+        if (sql.includes('CREATE INDEX idx_products_category_active')) {
+          const err = new Error('Duplicate key name');
+          err.errno = 1061;
+          throw err;
+        }
+        return [[]];
+      },
+      async execute(sql, params) {
+        if (sql.includes('INSERT IGNORE INTO schema_migrations')) {
+          insertedMigrations.push(params[0]);
+        }
+        return [{}];
+      },
+      async end() {
+        ended = true;
+      }
+    };
+
+    Module._resolveFilename = function patchedResolve(request, parent, isMain, options) {
+      if (request === 'mysql2/promise') {
+        return fakeMysqlId;
+      }
+      return originalResolve.call(this, request, parent, isMain, options);
+    };
+    require.cache[fakeMysqlId] = {
+      id: fakeMysqlId,
+      filename: fakeMysqlId,
+      loaded: true,
+      exports: { createConnection: async () => fakeConn }
+    };
+
+    const sqlRunnerPath = require.resolve('../src/db/sqlRunner');
+    const migratePath = require.resolve('../src/db/migrate');
+    const seedPath = require.resolve('../src/db/seed');
+    delete require.cache[sqlRunnerPath];
+    delete require.cache[migratePath];
+    delete require.cache[seedPath];
+
+    try {
+      const { runMigrations } = require('../src/db/migrate');
+      const { runSeeds } = require('../src/db/seed');
+
+      await runMigrations();
+      assert.equal(ended, true);
+      assert.equal(insertedMigrations.includes('001_create_users_and_addresses.sql'), false);
+      assert.equal(insertedMigrations.includes('006_create_indexes_and_constraints.sql'), true);
+      assert.equal(insertedMigrations.length, 5);
+
+      ended = false;
+      const beforeSeedCount = executedSql.length;
+      await runSeeds();
+      assert.equal(ended, true);
+      assert.ok(executedSql.length > beforeSeedCount);
+    } finally {
+      Module._resolveFilename = originalResolve;
+      delete require.cache[fakeMysqlId];
+      delete require.cache[sqlRunnerPath];
+      delete require.cache[migratePath];
+      delete require.cache[seedPath];
+    }
   });
 });
