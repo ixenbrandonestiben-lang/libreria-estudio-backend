@@ -1,0 +1,36 @@
+# Dependencias y builds
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Control de versiones y entorno
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Logs y temporales
+logs/
+*.log
+tmp/
+temp/
+
+# Tests y cobertura
+coverage/
+.nyc_output/
+tests/
+*.test.js
+*.spec.js
+
+# Documentación y configuración de desarrollo
+docs/
+README.md
+.eslintrc.json
+.prettierrc.json
+docker-compose*.yml
+Dockerfile
+.vscode/
+.idea/
+.DS_Store
