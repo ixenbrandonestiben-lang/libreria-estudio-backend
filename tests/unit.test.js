@@ -1,0 +1,464 @@
+process.env.NODE_ENV = 'test';
+
+const { describe, it, mock } = require('node:test');
+const assert = require('node:assert/strict');
+
+// Pre-seed config modules in require.cache so unit tests run without node_modules (mysql2/dotenv/nodemailer) or MySQL
+function seedModuleCache(relativePath, exportsValue) {
+  const resolved = require.resolve(relativePath);
+  require.cache[resolved] = {
+    id: resolved,
+    filename: resolved,
+    loaded: true,
+    exports: exportsValue
+  };
+}
+
+seedModuleCache('../src/config/database', {
+  getPool: () => ({}),
+  query: async () => [[], []],
+  getConnection: async () => ({
+    beginTransaction: async () => {},
+    commit: async () => {},
+    rollback: async () => {},
+    release: () => {}
+  }),
+  pingDatabase: async () => true,
+  closeDatabase: async () => {}
+});
+
+seedModuleCache('../src/config/env', {
+  env: {
+    nodeEnv: 'test',
+    isProduction: false,
+    isTest: true,
+    mail: { from: 'test@libreria.local' },
+    reservations: { ttlMinutes: 20 }
+  },
+  validateEnv: () => {}
+});
+
+seedModuleCache('../src/config/mail', {
+  getMailTransporter: () => ({
+    sendMail: async () => ({ messageId: 'mock-id' })
+  })
+});
+
+const {
+  trimString,
+  normalizeEmail,
+  escapeLike,
+  cleanText,
+  normalizeForMatching
+} = require('../src/utils/sanitizer');
+const { sendSuccess, sendError } = require('../src/utils/responseHelper');
+const { maskSensitiveData } = require('../src/utils/logger');
+const { termsAcceptanceMiddleware } = require('../src/middlewares/termsAcceptanceMiddleware');
+const orderModel = require('../src/models/orderModel');
+const productModel = require('../src/models/productModel');
+const { transitionOrderStatus, ORDER_STATUS } = require('../src/services/orderService');
+const {
+  quoteSchoolList,
+  parseRawLine,
+  extractTechnicalAttributes
+} = require('../src/services/schoolListService');
+
+function createMockRes() {
+  return {
+    statusCode: 200,
+    body: null,
+    headersSent: false,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    }
+  };
+}
+
+function loadErrorMiddlewareWithEnv(envOverrides) {
+  const envPath = require.resolve('../src/config/env');
+  const errMwPath = require.resolve('../src/middlewares/errorMiddleware');
+  const originalEnvCache = require.cache[envPath];
+  const originalErrMwCache = require.cache[errMwPath];
+
+  delete require.cache[errMwPath];
+  require.cache[envPath] = {
+    id: envPath,
+    filename: envPath,
+    loaded: true,
+    exports: {
+      env: {
+        nodeEnv: 'production',
+        isProduction: true,
+        isTest: false,
+        ...envOverrides
+      }
+    }
+  };
+
+  const loaded = require('../src/middlewares/errorMiddleware');
+
+  // Restore cache immediately so other tests are unaffected
+  if (originalEnvCache) {
+    require.cache[envPath] = originalEnvCache;
+  } else {
+    delete require.cache[envPath];
+  }
+  if (originalErrMwCache) {
+    require.cache[errMwPath] = originalErrMwCache;
+  } else {
+    delete require.cache[errMwPath];
+  }
+
+  return loaded;
+}
+
+describe('sanitizer.js', () => {
+  it('trimString trims whitespace and handles null/undefined safely', () => {
+    assert.equal(trimString('  hola mundo  '), 'hola mundo');
+    assert.equal(trimString(null), '');
+    assert.equal(trimString(undefined), '');
+    assert.equal(trimString(123), '123');
+  });
+
+  it('normalizeEmail trims and lowercases emails', () => {
+    assert.equal(normalizeEmail('  Usuario@Ejemplo.COM  '), 'usuario@ejemplo.com');
+  });
+
+  it('escapeLike escapes SQL LIKE wildcards (%, _, \\)', () => {
+    assert.equal(escapeLike('  100%_test\\path  '), '100\\%\\_test\\\\path');
+    assert.equal(escapeLike('cuaderno'), 'cuaderno');
+  });
+
+  it('cleanText removes control characters and collapses excess spaces/tabs', () => {
+    assert.equal(cleanText('  hola\u0000\u0007   mundo\t\tlibre\u007F  '), 'hola mundo libre');
+    assert.equal(cleanText(null), '');
+  });
+
+  it('normalizeForMatching strips accents and lowercases text', () => {
+    assert.equal(
+      normalizeForMatching('  Cuaderno Académico Útil  '),
+      'cuaderno academico util'
+    );
+  });
+});
+
+describe('responseHelper.js', () => {
+  it('sendSuccess formats { success: true, message, data } and optional meta', () => {
+    const res = createMockRes();
+    sendSuccess(res, {
+      statusCode: 201,
+      message: 'Creado',
+      data: { id: 42 },
+      meta: { total: 1 }
+    });
+
+    assert.equal(res.statusCode, 201);
+    assert.deepEqual(res.body, {
+      success: true,
+      message: 'Creado',
+      data: { id: 42 },
+      meta: { total: 1 }
+    });
+  });
+
+  it('sendError formats { success: false, error: { code, message } }', () => {
+    const res = createMockRes();
+    sendError(res, {
+      statusCode: 400,
+      code: 'BAD_INPUT',
+      message: 'Datos inválidos'
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.deepEqual(res.body, {
+      success: false,
+      error: {
+        code: 'BAD_INPUT',
+        message: 'Datos inválidos'
+      }
+    });
+  });
+});
+
+describe('logger.js', () => {
+  it('maskSensitiveData redacts password, token, authorization recursively', () => {
+    const input = {
+      user: 'ana@ejemplo.com',
+      password: 'mi-password-secreto',
+      token: 'eyJhbGciOiJIUzI1NiJ9',
+      headers: {
+        Authorization: 'Bearer secret-jwt',
+        'x-request-id': 'req-123'
+      },
+      items: [{ api_key: '12345', name: 'Cuaderno' }]
+    };
+
+    const masked = maskSensitiveData(input);
+    assert.equal(masked.user, 'ana@ejemplo.com');
+    assert.equal(masked.password, '[REDACTED]');
+    assert.equal(masked.token, '[REDACTED]');
+    assert.equal(masked.headers.Authorization, '[REDACTED]');
+    assert.equal(masked.headers['x-request-id'], 'req-123');
+    assert.equal(masked.items[0].api_key, '[REDACTED]');
+    assert.equal(masked.items[0].name, 'Cuaderno');
+  });
+
+  it('maskSensitiveData serializes Error without stack trace', () => {
+    const err = new Error('Fallo de conexión');
+    err.code = 'ECONNREFUSED';
+    const masked = maskSensitiveData(err);
+
+    assert.deepEqual(masked, {
+      name: 'Error',
+      message: 'Fallo de conexión',
+      code: 'ECONNREFUSED'
+    });
+    assert.equal('stack' in masked, false);
+  });
+});
+
+describe('termsAcceptanceMiddleware.js', () => {
+  it('rejects with 400 TERMS_NOT_ACCEPTED when termsAccepted is not strictly true', () => {
+    for (const body of [undefined, {}, { termsAccepted: false }, { termsAccepted: 'true' }]) {
+      const req = { body };
+      const res = createMockRes();
+      let nextCalled = false;
+
+      termsAcceptanceMiddleware(req, res, () => {
+        nextCalled = true;
+      });
+
+      assert.equal(nextCalled, false);
+      assert.equal(res.statusCode, 400);
+      assert.deepEqual(res.body, {
+        success: false,
+        error: {
+          code: 'TERMS_NOT_ACCEPTED',
+          message: 'Debes aceptar los Términos y Condiciones para continuar.'
+        }
+      });
+    }
+  });
+
+  it('calls next() when termsAccepted === true or terms_accepted === true', () => {
+    for (const body of [{ termsAccepted: true }, { terms_accepted: true }]) {
+      const req = { body };
+      const res = createMockRes();
+      let nextCalled = false;
+
+      termsAcceptanceMiddleware(req, res, () => {
+        nextCalled = true;
+      });
+
+      assert.equal(nextCalled, true);
+      assert.equal(res.body, null);
+    }
+  });
+});
+
+describe('errorMiddleware.js', () => {
+  it('in production does not expose stack trace or SQL details on 500 errors', () => {
+    const { errorHandler } = loadErrorMiddlewareWithEnv({ isProduction: true, nodeEnv: 'production' });
+    const req = { method: 'POST', originalUrl: '/api/v1/orders' };
+    const res = createMockRes();
+
+    const sqlError = new Error('You have an error in your SQL syntax near SELECT * FROM users');
+    sqlError.sqlMessage = 'Unknown column foo in field list';
+    sqlError.sql = 'SELECT foo FROM users';
+    sqlError.stack = 'Error: SQL syntax\n    at Query.execute (/app/src/models/userModel.js:12:5)';
+
+    // Silence stderr from logger.error during test
+    const writeMock = mock.method(process.stderr, 'write', () => true);
+    try {
+      errorHandler(sqlError, req, res, () => {});
+    } finally {
+      writeMock.mock.restore();
+    }
+
+    assert.equal(res.statusCode, 500);
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.error.code, 'DATABASE_ERROR');
+    assert.equal(
+      res.body.error.message,
+      'Error interno del servidor. Intenta nuevamente más tarde.'
+    );
+    assert.equal(res.body.error.details, undefined);
+    assert.equal(JSON.stringify(res.body).includes('SELECT'), false);
+    assert.equal(JSON.stringify(res.body).includes('userModel.js'), false);
+  });
+
+  it('handles malformed JSON SyntaxError as 400 INVALID_JSON and ER_DUP_ENTRY as 409 CONFLICT', () => {
+    const { errorHandler, notFoundHandler } = loadErrorMiddlewareWithEnv({ isProduction: true });
+    const req = { method: 'POST', originalUrl: '/api/v1/auth/login' };
+
+    const resJson = createMockRes();
+    const syntaxErr = new SyntaxError('Unexpected token');
+    syntaxErr.status = 400;
+    syntaxErr.body = '{bad';
+    errorHandler(syntaxErr, req, resJson, () => {});
+    assert.equal(resJson.statusCode, 400);
+    assert.equal(resJson.body.error.code, 'INVALID_JSON');
+
+    const resDup = createMockRes();
+    const dupErr = new Error('Duplicate entry');
+    dupErr.code = 'ER_DUP_ENTRY';
+    errorHandler(dupErr, req, resDup, () => {});
+    assert.equal(resDup.statusCode, 409);
+    assert.equal(resDup.body.error.code, 'CONFLICT');
+
+    const res404 = createMockRes();
+    notFoundHandler(req, res404);
+    assert.equal(res404.statusCode, 404);
+    assert.equal(res404.body.error.code, 'NOT_FOUND');
+  });
+});
+
+describe('orderService.js - state machine transitions', () => {
+  it('allows valid state transitions', async (t) => {
+    const updateMock = t.mock.method(orderModel, 'updateStatus', async () => true);
+
+    const validPairs = [
+      [ORDER_STATUS.PENDING_PAYMENT, ORDER_STATUS.PAID],
+      [ORDER_STATUS.PENDING_PAYMENT, ORDER_STATUS.CANCELLED],
+      [ORDER_STATUS.PAID, ORDER_STATUS.PROCESSING],
+      [ORDER_STATUS.PROCESSING, ORDER_STATUS.SHIPPED],
+      [ORDER_STATUS.SHIPPED, ORDER_STATUS.DELIVERED],
+      [ORDER_STATUS.DELIVERED, ORDER_STATUS.REFUNDED]
+    ];
+
+    for (const [from, to] of validPairs) {
+      const result = await transitionOrderStatus(10, from, to);
+      assert.deepEqual(result, {
+        orderId: 10,
+        previousStatus: from,
+        status: to
+      });
+    }
+
+    assert.equal(updateMock.mock.calls.length, validPairs.length);
+  });
+
+  it('rejects invalid state transitions with 400 INVALID_ORDER_TRANSITION', async (t) => {
+    const updateMock = t.mock.method(orderModel, 'updateStatus', async () => true);
+
+    const invalidPairs = [
+      [ORDER_STATUS.PENDING_PAYMENT, ORDER_STATUS.DELIVERED],
+      [ORDER_STATUS.CANCELLED, ORDER_STATUS.PAID],
+      [ORDER_STATUS.REFUNDED, ORDER_STATUS.DELIVERED],
+      [ORDER_STATUS.DELIVERED, ORDER_STATUS.SHIPPED]
+    ];
+
+    for (const [from, to] of invalidPairs) {
+      await assert.rejects(
+        () => transitionOrderStatus(10, from, to),
+        (err) => err.statusCode === 400 && err.code === 'INVALID_ORDER_TRANSITION'
+      );
+    }
+
+    assert.equal(updateMock.mock.calls.length, 0);
+  });
+
+  it('throws 404 ORDER_NOT_FOUND when orderModel.updateStatus returns false', async (t) => {
+    t.mock.method(orderModel, 'updateStatus', async () => false);
+
+    await assert.rejects(
+      () => transitionOrderStatus(999, ORDER_STATUS.PAID, ORDER_STATUS.PROCESSING),
+      (err) => err.statusCode === 404 && err.code === 'ORDER_NOT_FOUND'
+    );
+  });
+});
+
+describe('schoolListService.js - normalization and classification', () => {
+  it('parseRawLine extracts leading/trailing quantities and cleans numbering', () => {
+    assert.deepEqual(parseRawLine('1. 2x Cuaderno A4 cuadriculado'), {
+      originalLine: '1. 2x Cuaderno A4 cuadriculado',
+      description: 'Cuaderno A4 cuadriculado',
+      quantity: 2
+    });
+
+    assert.deepEqual(parseRawLine('- Lapicero azul x3'), {
+      originalLine: '- Lapicero azul x3',
+      description: 'Lapicero azul',
+      quantity: 3
+    });
+
+    assert.equal(parseRawLine('   '), null);
+  });
+
+  it('extractTechnicalAttributes extracts ruling, sheets, format, ink, and education level', () => {
+    const attrs = extractTechnicalAttributes(
+      'Cuaderno A4 cuadriculado 100 hojas 75g primaria'
+    );
+    assert.deepEqual(attrs, {
+      ruling_type: 'cuadriculado',
+      sheet_count: '100',
+      paper_weight_gsm: '75',
+      format_size: 'A4',
+      education_level: 'primaria'
+    });
+  });
+
+  it('quoteSchoolList classifies exact_match, alternative, out_of_stock, and not_found', async (t) => {
+    t.mock.method(productModel, 'findCandidatesForSchoolList', async (keywords) => {
+      if (keywords.includes('inexistente')) {
+        return [];
+      }
+      if (keywords.includes('agotado')) {
+        return [{ id: 2, title: 'Marcador Agotado', price: '25.00', stock_available: 0 }];
+      }
+      if (keywords.includes('regla')) {
+        return [{ id: 3, title: 'Escuadra Escolar', price: '18.00', stock_available: 10 }];
+      }
+      return [
+        {
+          id: 1,
+          title: 'Cuaderno A4 Cuadriculado 100 Hojas',
+          price: '45.00',
+          stock_available: 20
+        }
+      ];
+    });
+
+    t.mock.method(productModel, 'findAttributesByProductIds', async () => ({
+      1: [
+        { key: 'ruling_type', value: 'cuadriculado' },
+        { key: 'format_size', value: 'A4' }
+      ],
+      2: [],
+      3: []
+    }));
+
+    const quote = await quoteSchoolList({
+      rawText: [
+        '2 Cuaderno A4 cuadriculado',
+        '1 Regla flexible',
+        '1 Marcador agotado',
+        '1 Producto inexistente'
+      ].join('\n')
+    });
+
+    assert.equal(quote.items.length, 4);
+    assert.equal(quote.items[0].matchStatus, 'exact_match');
+    assert.equal(quote.items[0].lineEstimatedTotal, '90.00');
+    assert.equal(quote.items[1].matchStatus, 'alternative');
+    assert.equal(quote.items[1].lineEstimatedTotal, '18.00');
+    assert.equal(quote.items[2].matchStatus, 'out_of_stock');
+    assert.equal(quote.items[2].lineEstimatedTotal, '0.00');
+    assert.equal(quote.items[3].matchStatus, 'not_found');
+    assert.equal(quote.items[3].lineEstimatedTotal, '0.00');
+
+    assert.deepEqual(quote.summary, {
+      totalItems: 4,
+      exactMatches: 1,
+      alternatives: 1,
+      outOfStock: 1,
+      notFound: 1,
+      estimatedSubtotal: '108.00'
+    });
+  });
+});
