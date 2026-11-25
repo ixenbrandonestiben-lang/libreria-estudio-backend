@@ -59,9 +59,6 @@ services:
       MAIL_FROM: ${MAIL_FROM:-Librería Estudio <no-reply@libreriaestudio.local>}
     command: ["sh", "-c", "npm run migrate && npm run seed && exec node src/server.js"]
     ports:
-    ports:
-      - "${PORT:-3001}:3000"
-
       - "${PORT:-3000}:3000"
     networks:
       - backend-internal-net
