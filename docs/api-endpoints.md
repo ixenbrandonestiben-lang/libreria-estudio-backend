@@ -2,7 +2,7 @@
 
 ## Convenciones generales
 
-- **Prefijo base:** `/api/v1` (configurable mediante `API_PREFIX`)
+- **Prefijo base:** `/api/v1`
 - **Formato de intercambio:** `application/json; charset=utf-8`
 - **Codificación:** UTF-8 (`utf8mb4` en MySQL)
 
@@ -11,12 +11,14 @@
 **Éxito:**
 ```json
 {
-  "ok": true,
+  "success": true,
+  "message": "Operación completada",
   "data": {},
   "meta": {
     "page": 1,
     "limit": 20,
-    "total": 100
+    "totalItems": 100,
+    "totalPages": 5
   }
 }
 ```
@@ -24,10 +26,11 @@
 **Error:**
 ```json
 {
-  "ok": false,
+  "success": false,
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "Descripción clara del error"
+    "message": "Los datos enviados contienen errores de validación",
+    "details": []
   }
 }
 ```
@@ -39,46 +42,75 @@
 | Método | Ruta | Descripción | Autenticación |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/health` | Verifica estado de la API y conectividad con MySQL (`200 OK` / `503 Service Unavailable`). | Pública |
+| `GET` | `/api/v1/health` | Alias versionado de salud del servicio. | Pública |
 
 ---
 
-## Catálogo de Libros (`/api/v1/books`)
+## Autenticación (`/api/v1/auth`)
 
 | Método | Ruta | Descripción | Autenticación |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/books` | Lista libros con paginación (`page`, `limit`), búsqueda (`q`) y filtro por categoría (`category`). | Pública |
-| `GET` | `/api/v1/books/:id` | Obtiene el detalle completo de un libro por su ID. | Pública |
-| `POST` | `/api/v1/books` | Registra un nuevo libro en el catálogo. | Requerida (Admin) |
-| `PUT` | `/api/v1/books/:id` | Actualiza los datos de un libro existente. | Requerida (Admin) |
-| `DELETE` | `/api/v1/books/:id` | Elimina o desactiva un libro del catálogo. | Requerida (Admin) |
+| `POST` | `/api/v1/auth/register` | Registro de usuario (`{ fullName, email, password, phone? }`). | Pública |
+| `POST` | `/api/v1/auth/login` | Inicio de sesión y emisión de JWT. | Pública |
+| `POST` | `/api/v1/auth/logout` | Cierre de sesión. | Pública |
+| `POST` | `/api/v1/auth/forgot-password` | Solicitud de token de recuperación de contraseña. | Pública |
+| `POST` | `/api/v1/auth/reset-password` | Restablecimiento con `{ token, newPassword }`. | Pública |
+| `GET` | `/api/v1/auth/me` | Perfil del usuario autenticado. | Requerida |
 
 ---
 
-## Categorías (`/api/v1/categories`)
+## Catálogo y Productos (`/api/v1/products`)
 
 | Método | Ruta | Descripción | Autenticación |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v1/categories` | Lista todas las categorías disponibles en la librería. | Pública |
-| `POST` | `/api/v1/categories` | Crea una nueva categoría. | Requerida (Admin) |
+| `GET` | `/api/v1/products/categories` | Lista categorías activas. | Pública |
+| `GET` | `/api/v1/products/brands` | Lista marcas activas. | Pública |
+| `GET` | `/api/v1/products` | Listado paginado y filtrado (`q`, `category`, `brand`, `minPrice`, `maxPrice`, `inStock`, `ruling_type`, `sheet_count`, `paper_weight_gsm`, `format_size`, `education_level`, `sort`). | Pública |
+| `GET` | `/api/v1/products/:idOrSlug` | Detalle de producto y atributos técnicos. | Pública |
 
 ---
 
-## Consultas y Reservas (`/api/v1/inquiries`)
+## Cotizador de Listas Escolares (`/api/v1/school-lists`)
 
 | Método | Ruta | Descripción | Autenticación |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/inquiries` | Envía una consulta o solicitud de reserva de libro. Protegido con rate limiting. | Pública |
-| `GET` | `/api/v1/inquiries` | Lista consultas recibidas para gestión interna. | Requerida (Admin) |
+| `POST` | `/api/v1/school-lists/quote` | Recibe `{ rawText?, items?, allowSubstitutes? }` y devuelve ítems clasificados (`exact_match`, `alternative`, `out_of_stock`, `not_found`) con subtotal estimado. | Pública |
 
 ---
 
-## Códigos de estado HTTP esperados
+## Carrito y Reservas (`/api/v1/cart`)
 
-- `200 OK`: Operación exitosa.
-- `201 Created`: Recurso creado correctamente.
-- `400 Bad Request`: Parámetros inválidos o error de validación.
-- `401 Unauthorized`: Token ausente, inválido o expirado.
-- `403 Forbidden`: Permisos insuficientes.
-- `404 Not Found`: Recurso no encontrado.
-- `429 Too Many Requests`: Límite de peticiones excedido (rate limit).
-- `500 Internal Server Error`: Error inesperado del servidor (sin exponer stack traces en producción).
+| Método | Ruta | Descripción | Autenticación |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/cart` | Obtiene el carrito actual (usuario o `X-Cart-Token` / cookie). | Opcional |
+| `POST` | `/api/v1/cart/items` | Agrega producto `{ productId, quantity }`. | Opcional |
+| `PUT` | `/api/v1/cart/items/:productId` | Actualiza cantidad `{ quantity }`. | Opcional |
+| `DELETE` | `/api/v1/cart/items/:productId` | Elimina producto del carrito. | Opcional |
+| `DELETE` | `/api/v1/cart` | Vacía el carrito. | Opcional |
+| `POST` | `/api/v1/cart/reserve` | Inicia reserva temporal de inventario para checkout. | Opcional |
+
+---
+
+## Órdenes y Rastreo (`/api/v1/orders`)
+
+| Método | Ruta | Descripción | Autenticación |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/v1/orders` | Crea orden con transacción ACID, recálculo en servidor y `termsAccepted: true`. | Opcional |
+| `GET` | `/api/v1/orders` | Historial de órdenes del usuario autenticado. | Requerida |
+| `GET` | `/api/v1/orders/track` | Rastreo público por `?orderNumber=...&email=...`. | Pública |
+| `GET` | `/api/v1/orders/:orderNumber` | Detalle de orden propia (anti-IDOR). | Requerida |
+| `PATCH` | `/api/v1/orders/:orderNumber/status` | Transición controlada de estado. | Admin |
+
+---
+
+## Usuario, Soporte y Legal (`/api/v1/users`, `/api/v1/support`, `/api/v1/legal`)
+
+| Método | Ruta | Descripción | Autenticación |
+| :--- | :--- | :--- | :--- |
+| `GET` / `PUT` | `/api/v1/users/profile` | Consulta o actualiza perfil (`fullName`, `phone`). | Requerida |
+| `GET` / `POST` | `/api/v1/users/addresses` | Lista o crea direcciones de entrega. | Requerida |
+| `PUT` / `DELETE` | `/api/v1/users/addresses/:addressId` | Actualiza o elimina dirección propia. | Requerida |
+| `GET` | `/api/v1/support/faq` | Lista/filtra preguntas frecuentes. | Pública |
+| `POST` | `/api/v1/support/tickets` | Crea ticket (`{ contactEmail, subject, message, orderNumber? }`). | Opcional |
+| `GET` | `/api/v1/legal/metadata` | Versiones vigentes de Términos, Privacidad y Cookies. | Pública |
+| `GET` / `POST` | `/api/v1/legal/cookies/consent` | Consulta o guarda consentimiento granular de cookies. | Opcional |

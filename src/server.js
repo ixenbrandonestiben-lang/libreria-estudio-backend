@@ -37,13 +37,13 @@ async function startServer() {
   });
 }
 
-async function gracefulShutdown(signal) {
+async function gracefulShutdown(signal, exitCode = 0) {
   if (isShuttingDown) {
     return;
   }
   isShuttingDown = true;
 
-  logger.info('Iniciando cierre elegante del servidor', { signal });
+  logger.info('Iniciando cierre elegante del servidor', { signal, exitCode });
   releaseExpiredReservationsJob.stop();
 
   const forceExitTimer = setTimeout(() => {
@@ -69,15 +69,15 @@ async function gracefulShutdown(signal) {
     logger.info('Pool de conexiones MySQL cerrado');
 
     clearTimeout(forceExitTimer);
-    process.exit(0);
+    process.exit(exitCode);
   } catch (err) {
     logger.error('Error durante el cierre elegante', { error: err.message });
     process.exit(1);
   }
 }
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM', 0));
+process.on('SIGINT', () => gracefulShutdown('SIGINT', 0));
 
 process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled Promise Rejection', {
@@ -87,7 +87,7 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (err) => {
   logger.error('Uncaught Exception', { error: err.message });
-  gracefulShutdown('uncaughtException');
+  gracefulShutdown('uncaughtException', 1);
 });
 
 startServer();
