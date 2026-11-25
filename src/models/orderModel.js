@@ -214,6 +214,56 @@ async function updateStatus(orderId, nextStatus, conn = null) {
   return result.affectedRows === 1;
 }
 
+/**
+ * Lists all orders for admin management with optional status filter and pagination.
+ * @param {{ page?: number, limit?: number, status?: string }} [filters={}]
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function findAllForAdmin(filters = {}, conn = null) {
+  const db = conn || getPool();
+  const page = Math.max(1, Number.parseInt(filters.page || '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(filters.limit || '20', 10) || 20));
+  const offset = (page - 1) * limit;
+
+  const whereClauses = [];
+  const params = [];
+
+  if (filters.status && ALLOWED_ORDER_STATUSES.has(filters.status)) {
+    whereClauses.push('status = ?');
+    params.push(filters.status);
+  }
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+  const [countRows] = await db.execute(
+    `SELECT COUNT(*) AS total FROM orders ${whereSql}`,
+    params
+  );
+  const total = Number(countRows[0]?.total || 0);
+
+  const [rows] = await db.execute(
+    `SELECT
+       id, order_number, user_id, customer_email, customer_name, customer_phone,
+       delivery_method, subtotal, discount_amount, shipping_cost, tax_amount,
+       total_amount, status, payment_reference, created_at, updated_at
+     FROM orders
+     ${whereSql}
+     ORDER BY created_at DESC, id DESC
+     LIMIT ? OFFSET ?`,
+    [...params, String(limit), String(offset)]
+  );
+
+  return {
+    items: rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    }
+  };
+}
+
 module.exports = {
   ALLOWED_ORDER_STATUSES,
   createOrder,
@@ -223,5 +273,6 @@ module.exports = {
   findOrderItems,
   findByOrderNumberAndUserId,
   findForTracking,
-  updateStatus
+  updateStatus,
+  findAllForAdmin
 };
