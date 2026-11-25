@@ -15,7 +15,9 @@ function buildPoolConfig() {
     host: process.env.DB_HOST || '127.0.0.1',
     port: Number.isNaN(port) ? 3306 : port,
     database: process.env.DB_NAME || 'libreria_estudio',
-    user: process.env.DB_USER || '',
+    user:
+      process.env.DB_USER ||
+      (process.env.NODE_ENV === 'production' ? '' : 'libreria_user'),
     password: process.env.DB_PASSWORD || '',
     waitForConnections: true,
     connectionLimit: Number.isNaN(connectionLimit) ? 10 : connectionLimit,

@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -36,12 +37,12 @@ function validateEnv() {
   }
 
   const dbHost = process.env.DB_HOST || '127.0.0.1';
-  const dbName = process.env.DB_NAME || '';
-  const dbUser = process.env.DB_USER || '';
+  const dbName = process.env.DB_NAME || (nodeEnv === 'development' ? 'libreria_estudio' : '');
+  const dbUser = process.env.DB_USER || (nodeEnv === 'development' ? 'libreria_user' : '');
   const dbPassword = process.env.DB_PASSWORD || '';
   const jwtSecret = process.env.JWT_SECRET || '';
 
-  if (nodeEnv !== 'test') {
+  if (nodeEnv === 'production') {
     if (!dbHost.trim()) {
       errors.push('DB_HOST es obligatorio.');
     }
@@ -51,12 +52,6 @@ function validateEnv() {
     if (!dbUser.trim()) {
       errors.push('DB_USER es obligatorio.');
     }
-    if (!jwtSecret.trim()) {
-      errors.push('JWT_SECRET es obligatorio.');
-    }
-  }
-
-  if (nodeEnv === 'production') {
     if (!dbPassword || isPlaceholder(dbPassword)) {
       errors.push('DB_PASSWORD debe estar configurado con un valor seguro en producción.');
     }
@@ -67,6 +62,10 @@ function validateEnv() {
     if (!corsOrigin || corsOrigin === '*') {
       errors.push('CORS_ORIGIN debe restringirse a orígenes autorizados en producción (no "*").');
     }
+  } else if (nodeEnv === 'development') {
+    if (!dbHost.trim()) {
+      errors.push('DB_HOST es obligatorio.');
+    }
   }
 
   if (errors.length > 0) {
@@ -76,15 +75,25 @@ function validateEnv() {
 
 validateEnv();
 
-const corsOrigins = (process.env.CORS_ORIGIN || 'http://localhost:8080,http://localhost:5173')
+const nodeEnv = process.env.NODE_ENV || 'development';
+const resolvedJwtSecret =
+  process.env.JWT_SECRET && process.env.JWT_SECRET.trim()
+    ? process.env.JWT_SECRET.trim()
+    : nodeEnv === 'production'
+      ? ''
+      : crypto.randomBytes(32).toString('hex');
+
+const corsOrigins = (
+  process.env.CORS_ORIGIN || 'http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173'
+)
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
 
 const env = Object.freeze({
-  nodeEnv: process.env.NODE_ENV || 'development',
-  isProduction: (process.env.NODE_ENV || 'development') === 'production',
-  isTest: (process.env.NODE_ENV || 'development') === 'test',
+  nodeEnv,
+  isProduction: nodeEnv === 'production',
+  isTest: nodeEnv === 'test',
   port: parsePositiveInt(process.env.PORT, 3000),
   apiPrefix: process.env.API_PREFIX || '/api/v1',
   logLevel: (process.env.LOG_LEVEL || 'info').toLowerCase(),
@@ -97,7 +106,7 @@ const env = Object.freeze({
     poolLimit: parsePositiveInt(process.env.DB_POOL_LIMIT, 10)
   }),
   jwt: Object.freeze({
-    secret: process.env.JWT_SECRET || 'test-only-jwt-secret-placeholder-32chars',
+    secret: resolvedJwtSecret,
     expiresIn: process.env.JWT_EXPIRES_IN || '1d'
   }),
   bcryptRounds: Math.min(14, Math.max(10, parsePositiveInt(process.env.BCRYPT_ROUNDS, 12))),
