@@ -14,10 +14,11 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 # Copiar manifiestos e instalar solo dependencias de producción
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev --no-audit --no-fund; fi && npm cache clean --force
 
-# Copiar código fuente con permisos adecuados para appuser
+# Copiar código fuente y scripts de base de datos con permisos adecuados para appuser
 COPY --chown=appuser:appgroup src/ ./src/
+COPY --chown=appuser:appgroup database/ ./database/
 
 # Cambiar a usuario no-root
 USER appuser
