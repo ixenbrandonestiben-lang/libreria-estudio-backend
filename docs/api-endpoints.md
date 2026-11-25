@@ -114,3 +114,20 @@
 | `POST` | `/api/v1/support/tickets` | Crea ticket (`{ contactEmail, subject, message, orderNumber? }`). | Opcional |
 | `GET` | `/api/v1/legal/metadata` | Versiones vigentes de Términos, Privacidad y Cookies. | Pública |
 | `GET` / `POST` | `/api/v1/legal/cookies/consent` | Consulta o guarda consentimiento granular de cookies. | Opcional |
+
+---
+
+## Administración (`/api/v1/admin`)
+
+Todos los endpoints bajo `/api/v1/admin` requieren autenticación JWT (`authMiddleware`) y rol `admin` (`requireRole('admin')`).
+
+| Método | Ruta | Descripción | Autenticación |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/admin/users` | Lista usuarios paginados sin `password_hash` (`?page`, `?limit`, `?q`). | Admin |
+| `PATCH` | `/api/v1/admin/users/:userId` | Actualiza `{ role?, isActive? }` (impide auto-degradación o auto-desactivación con `400 SELF_ROLE_CHANGE_FORBIDDEN`). | Admin |
+| `GET` | `/api/v1/admin/products` | Lista todos los productos incluyendo inactivos (`?page`, `?limit`, `?q`). | Admin |
+| `POST` | `/api/v1/admin/products` | Crea un nuevo producto en el catálogo. | Admin |
+| `PATCH` | `/api/v1/admin/products/:productId` | Actualiza campos, precio, stock o estado activo de un producto. | Admin |
+| `GET` | `/api/v1/admin/orders` | Lista todas las órdenes (`?page`, `?limit`, `?status`). | Admin |
+| `GET` | `/api/v1/admin/tickets` | Lista todos los tickets de soporte (`?page`, `?limit`, `?status`). | Admin |
+| `PATCH` | `/api/v1/admin/tickets/:ticketCode` | Actualiza el estado de un ticket (`open`, `in_progress`, `resolved`, `closed`). | Admin |

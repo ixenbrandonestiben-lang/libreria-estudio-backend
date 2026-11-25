@@ -8,6 +8,7 @@ const orderRoutes = require('./orderRoutes');
 const userRoutes = require('./userRoutes');
 const supportRoutes = require('./supportRoutes');
 const legalRoutes = require('./legalRoutes');
+const adminRoutes = require('./adminRoutes');
 
 const router = express.Router();
 
@@ -20,5 +21,6 @@ router.use('/orders', orderRoutes);
 router.use('/users', userRoutes);
 router.use('/support', supportRoutes);
 router.use('/legal', legalRoutes);
+router.use('/admin', adminRoutes);
 
 module.exports = router;

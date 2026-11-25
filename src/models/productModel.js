@@ -284,6 +284,192 @@ async function findCandidatesForSchoolList(keywords, limit = 5, conn = null) {
   return rows;
 }
 
+/**
+ * Lists all products (including inactive) for admin management with pagination and search.
+ * @param {{ page?: number, limit?: number, q?: string }} [filters={}]
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function findAllForAdmin(filters = {}, conn = null) {
+  const db = conn || getPool();
+  const page = Math.max(1, Number.parseInt(filters.page || '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(filters.limit || '20', 10) || 20));
+  const offset = (page - 1) * limit;
+
+  const whereClauses = [];
+  const params = [];
+
+  if (filters.q) {
+    const term = `%${String(filters.q).trim()}%`;
+    whereClauses.push('(p.title LIKE ? OR p.sku LIKE ? OR p.isbn LIKE ? OR p.slug LIKE ?)');
+    params.push(term, term, term, term);
+  }
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+  const baseFrom = `
+    FROM products p
+    INNER JOIN categories c ON c.id = p.category_id
+    INNER JOIN brands b ON b.id = p.brand_id
+    ${whereSql}
+  `;
+
+  const [countRows] = await db.execute(
+    `SELECT COUNT(*) AS total ${baseFrom}`,
+    params
+  );
+  const total = Number(countRows[0]?.total || 0);
+
+  const [rows] = await db.execute(
+    `SELECT
+       p.id, p.category_id, p.brand_id, p.sku, p.isbn, p.title, p.slug,
+       p.short_description, p.unit_label, p.units_per_pack, p.price,
+       p.stock_available, p.stock_reserved, p.image_url, p.is_active,
+       p.created_at, p.updated_at,
+       c.name AS category_name, c.slug AS category_slug,
+       b.name AS brand_name, b.slug AS brand_slug
+     ${baseFrom}
+     ORDER BY p.created_at DESC, p.id DESC
+     LIMIT ? OFFSET ?`,
+    [...params, String(limit), String(offset)]
+  );
+
+  const productIds = rows.map((r) => r.id);
+  const attributesMap = await findAttributesByProductIds(productIds, conn);
+
+  const items = rows.map((row) => ({
+    ...row,
+    attributes: attributesMap[row.id] || []
+  }));
+
+  return {
+    items,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    }
+  };
+}
+
+/**
+ * Finds a single product by ID for admin (including inactive).
+ * @param {number} productId
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function findByIdForAdmin(productId, conn = null) {
+  const db = conn || getPool();
+  const [rows] = await db.execute(
+    `SELECT
+       p.id, p.category_id, p.brand_id, p.sku, p.isbn, p.title, p.slug,
+       p.short_description, p.unit_label, p.units_per_pack, p.price,
+       p.stock_available, p.stock_reserved, p.image_url, p.is_active,
+       p.created_at, p.updated_at,
+       c.name AS category_name, c.slug AS category_slug,
+       b.name AS brand_name, b.slug AS brand_slug
+     FROM products p
+     INNER JOIN categories c ON c.id = p.category_id
+     INNER JOIN brands b ON b.id = p.brand_id
+     WHERE p.id = ?
+     LIMIT 1`,
+    [productId]
+  );
+
+  const product = rows[0] || null;
+  if (!product) {
+    return null;
+  }
+
+  const attributesMap = await findAttributesByProductIds([product.id], conn);
+  return {
+    ...product,
+    attributes: attributesMap[product.id] || []
+  };
+}
+
+/**
+ * Creates a new product in the catalog.
+ * @param {object} data
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function createProduct(data, conn = null) {
+  const db = conn || getPool();
+  const [result] = await db.execute(
+    `INSERT INTO products (
+       category_id, brand_id, sku, isbn, title, slug, short_description,
+       unit_label, units_per_pack, price, stock_available, stock_reserved,
+       image_url, is_active
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    [
+      data.categoryId,
+      data.brandId,
+      data.sku,
+      data.isbn || null,
+      data.title,
+      data.slug,
+      data.shortDescription,
+      data.unitLabel || 'unidad',
+      data.unitsPerPack !== undefined ? data.unitsPerPack : 1,
+      data.price,
+      data.stockAvailable !== undefined ? data.stockAvailable : 0,
+      data.imageUrl || null,
+      data.isActive !== undefined ? (data.isActive ? 1 : 0) : 1
+    ]
+  );
+
+  return findByIdForAdmin(result.insertId, conn);
+}
+
+/**
+ * Updates allowed product fields by ID for admin management.
+ * @param {number} productId
+ * @param {object} data
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function updateProduct(productId, data = {}, conn = null) {
+  const db = conn || getPool();
+  const setClauses = [];
+  const params = [];
+
+  const fieldMap = [
+    ['categoryId', 'category_id', (v) => v],
+    ['brandId', 'brand_id', (v) => v],
+    ['sku', 'sku', (v) => v],
+    ['isbn', 'isbn', (v) => v || null],
+    ['title', 'title', (v) => v],
+    ['slug', 'slug', (v) => v],
+    ['shortDescription', 'short_description', (v) => v],
+    ['unitLabel', 'unit_label', (v) => v],
+    ['unitsPerPack', 'units_per_pack', (v) => v],
+    ['price', 'price', (v) => v],
+    ['stockAvailable', 'stock_available', (v) => v],
+    ['imageUrl', 'image_url', (v) => v || null],
+    ['isActive', 'is_active', (v) => (v ? 1 : 0)]
+  ];
+
+  for (const [key, column, transform] of fieldMap) {
+    if (Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined) {
+      setClauses.push(`${column} = ?`);
+      params.push(transform(data[key]));
+    }
+  }
+
+  if (setClauses.length === 0) {
+    return findByIdForAdmin(productId, conn);
+  }
+
+  params.push(productId);
+  const [result] = await db.execute(
+    `UPDATE products SET ${setClauses.join(', ')} WHERE id = ?`,
+    params
+  );
+
+  if (result.affectedRows === 0) {
+    return null;
+  }
+
+  return findByIdForAdmin(productId, conn);
+}
+
 module.exports = {
   ALLOWED_ATTRIBUTE_KEYS,
   listCategories,
@@ -291,5 +477,9 @@ module.exports = {
   findAttributesByProductIds,
   searchProducts,
   findProductDetail,
-  findCandidatesForSchoolList
+  findCandidatesForSchoolList,
+  findAllForAdmin,
+  findByIdForAdmin,
+  createProduct,
+  updateProduct
 };

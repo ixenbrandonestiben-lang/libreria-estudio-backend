@@ -188,6 +188,93 @@ async function markResetTokenUsed(tokenId, conn = null) {
   return result.affectedRows === 1;
 }
 
+/**
+ * Lists users for admin panel with pagination and optional search (never includes password_hash).
+ * @param {{ page?: number, limit?: number, q?: string }} [filters={}]
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function findAllForAdmin(filters = {}, conn = null) {
+  const db = conn || getPool();
+  const page = Math.max(1, Number.parseInt(filters.page || '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(filters.limit || '20', 10) || 20));
+  const offset = (page - 1) * limit;
+
+  const whereClauses = [];
+  const params = [];
+
+  if (filters.q) {
+    const term = `%${String(filters.q).trim()}%`;
+    whereClauses.push('(full_name LIKE ? OR email LIKE ?)');
+    params.push(term, term);
+  }
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+  const [countRows] = await db.execute(
+    `SELECT COUNT(*) AS total FROM users ${whereSql}`,
+    params
+  );
+  const total = Number(countRows[0]?.total || 0);
+
+  const [rows] = await db.execute(
+    `SELECT ${SAFE_USER_COLUMNS}
+     FROM users
+     ${whereSql}
+     ORDER BY created_at DESC, id DESC
+     LIMIT ? OFFSET ?`,
+    [...params, String(limit), String(offset)]
+  );
+
+  return {
+    items: rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit)
+    }
+  };
+}
+
+/**
+ * Updates a user's role and/or active status for admin management.
+ * @param {number} userId
+ * @param {{ role?: string, isActive?: boolean }} updates
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function updateRoleAndStatus(userId, updates = {}, conn = null) {
+  const db = conn || getPool();
+  const setClauses = [];
+  const params = [];
+
+  if (updates.role !== undefined) {
+    const normalizedRole = updates.role === 'admin' ? 'admin' : 'customer';
+    setClauses.push('role = ?');
+    params.push(normalizedRole);
+  }
+
+  if (updates.isActive !== undefined) {
+    setClauses.push('is_active = ?');
+    params.push(updates.isActive ? 1 : 0);
+  }
+
+  if (setClauses.length === 0) {
+    return findById(userId, conn);
+  }
+
+  params.push(userId);
+  const [result] = await db.execute(
+    `UPDATE users SET ${setClauses.join(', ')} WHERE id = ?`,
+    params
+  );
+
+  if (result.affectedRows === 0) {
+    return null;
+  }
+
+  return findById(userId, conn);
+}
+
 module.exports = {
   findById,
   findByEmail,
@@ -198,5 +285,7 @@ module.exports = {
   deactivateUser,
   createPasswordResetToken,
   findValidResetToken,
-  markResetTokenUsed
+  markResetTokenUsed,
+  findAllForAdmin,
+  updateRoleAndStatus
 };

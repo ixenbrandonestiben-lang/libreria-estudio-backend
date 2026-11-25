@@ -63,6 +63,10 @@ const { maskSensitiveData } = require('../src/utils/logger');
 const { termsAcceptanceMiddleware } = require('../src/middlewares/termsAcceptanceMiddleware');
 const orderModel = require('../src/models/orderModel');
 const productModel = require('../src/models/productModel');
+const userModel = require('../src/models/userModel');
+const supportModel = require('../src/models/supportModel');
+const { requireRole } = require('../src/middlewares/roleMiddleware');
+const adminService = require('../src/services/adminService');
 const { transitionOrderStatus, ORDER_STATUS } = require('../src/services/orderService');
 const {
   quoteSchoolList,
@@ -671,5 +675,165 @@ describe('sqlRunner.js - SQL parsing and database directory integrity', () => {
       delete require.cache[migratePath];
       delete require.cache[seedPath];
     }
+  });
+});
+
+describe('roleMiddleware.js - requireRole("admin")', () => {
+  it('passes 401 UNAUTHORIZED to next() when req.user is missing', () => {
+    const middleware = requireRole('admin');
+    let capturedErr = null;
+
+    middleware({}, {}, (err) => {
+      capturedErr = err;
+    });
+
+    assert.ok(capturedErr);
+    assert.equal(capturedErr.statusCode, 401);
+    assert.equal(capturedErr.code, 'UNAUTHORIZED');
+  });
+
+  it('passes 403 FORBIDDEN to next() when user role is not admin', () => {
+    const middleware = requireRole('admin');
+    let capturedErr = null;
+
+    middleware({ user: { id: 2, role: 'customer' } }, {}, (err) => {
+      capturedErr = err;
+    });
+
+    assert.ok(capturedErr);
+    assert.equal(capturedErr.statusCode, 403);
+    assert.equal(capturedErr.code, 'FORBIDDEN');
+  });
+
+  it('calls next() with no arguments when user role is admin', () => {
+    const middleware = requireRole('admin');
+    let nextCalled = false;
+    let capturedErr;
+
+    middleware({ user: { id: 1, role: 'admin' } }, {}, (err) => {
+      nextCalled = true;
+      capturedErr = err;
+    });
+
+    assert.equal(nextCalled, true);
+    assert.equal(capturedErr, undefined);
+  });
+});
+
+describe('adminService.js', () => {
+  it('listUsers sanitizes search query and delegates to userModel.findAllForAdmin', async (t) => {
+    const spy = t.mock.method(userModel, 'findAllForAdmin', async (filters) => ({
+      items: [{ id: 1, email: 'admin@libreria.local', role: 'admin' }],
+      pagination: { page: filters.page || 1, limit: filters.limit || 20, total: 1, totalPages: 1 }
+    }));
+
+    const result = await adminService.listUsers({ page: 2, limit: 10, q: '  ana_100%  ' });
+    assert.equal(spy.mock.calls.length, 1);
+    assert.deepEqual(spy.mock.calls[0].arguments[0], {
+      page: 2,
+      limit: 10,
+      q: 'ana\\_100\\%'
+    });
+    assert.equal(result.items.length, 1);
+  });
+
+  it('updateUserRoleAndStatus forbids self role downgrade or self deactivation with 400 SELF_ROLE_CHANGE_FORBIDDEN', async (t) => {
+    const updateSpy = t.mock.method(userModel, 'updateRoleAndStatus', async () => ({ id: 1 }));
+
+    await assert.rejects(
+      () => adminService.updateUserRoleAndStatus(1, 1, { role: 'customer' }),
+      (err) => err.statusCode === 400 && err.code === 'SELF_ROLE_CHANGE_FORBIDDEN'
+    );
+
+    await assert.rejects(
+      () => adminService.updateUserRoleAndStatus(1, '1', { isActive: false }),
+      (err) => err.statusCode === 400 && err.code === 'SELF_ROLE_CHANGE_FORBIDDEN'
+    );
+
+    assert.equal(updateSpy.mock.calls.length, 0);
+  });
+
+  it('updateUserRoleAndStatus updates another user and throws 404 USER_NOT_FOUND when missing', async (t) => {
+    t.mock.method(userModel, 'updateRoleAndStatus', async (userId) => {
+      if (userId === 999) return null;
+      return { id: userId, role: 'admin', is_active: 1 };
+    });
+
+    const updated = await adminService.updateUserRoleAndStatus(1, 5, { role: 'admin', isActive: true });
+    assert.deepEqual(updated, { id: 5, role: 'admin', is_active: 1 });
+
+    await assert.rejects(
+      () => adminService.updateUserRoleAndStatus(1, 999, { role: 'customer' }),
+      (err) => err.statusCode === 404 && err.code === 'USER_NOT_FOUND'
+    );
+  });
+
+  it('listProducts, createProduct, and updateProduct manage catalog items and handle 404', async (t) => {
+    t.mock.method(productModel, 'findAllForAdmin', async () => ({
+      items: [{ id: 10, title: 'Cuaderno Inactivo', is_active: 0 }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 }
+    }));
+    const createSpy = t.mock.method(productModel, 'createProduct', async (payload) => ({
+      id: 11,
+      ...payload
+    }));
+    t.mock.method(productModel, 'updateProduct', async (productId, payload) => {
+      if (productId === 999) return null;
+      return { id: productId, ...payload };
+    });
+
+    const list = await adminService.listProducts({ page: 1, limit: 20 });
+    assert.equal(list.items[0].is_active, 0);
+
+    const created = await adminService.createProduct({
+      categoryId: 1,
+      brandId: 2,
+      sku: 'CUAD-100',
+      title: '  Cuaderno Profesional  ',
+      slug: 'cuaderno-profesional',
+      shortDescription: 'Cuaderno de 100 hojas',
+      price: 45.5,
+      stockAvailable: 30
+    });
+    assert.equal(createSpy.mock.calls.length, 1);
+    assert.equal(created.price, '45.50');
+    assert.equal(created.title, 'Cuaderno Profesional');
+
+    const updated = await adminService.updateProduct(11, { price: 49, isActive: false });
+    assert.equal(updated.price, '49.00');
+    assert.equal(updated.isActive, false);
+
+    await assert.rejects(
+      () => adminService.updateProduct(999, { price: 10 }),
+      (err) => err.statusCode === 404 && err.code === 'PRODUCT_NOT_FOUND'
+    );
+  });
+
+  it('listOrders, listTickets, and updateTicketStatus delegate cleanly and throw 404 on missing ticket', async (t) => {
+    t.mock.method(orderModel, 'findAllForAdmin', async () => ({
+      items: [{ id: 1, order_number: 'ORD-001', status: 'paid' }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 }
+    }));
+    t.mock.method(supportModel, 'findAllTicketsForAdmin', async () => ({
+      items: [{ id: 1, ticket_code: 'SUP-20261125-ABC123', status: 'open' }],
+      pagination: { page: 1, limit: 20, total: 1, totalPages: 1 }
+    }));
+    t.mock.method(supportModel, 'updateTicketStatus', async (ticketCode) => {
+      return ticketCode === 'SUP-20261125-ABC123';
+    });
+
+    const orders = await adminService.listOrders({ page: 1, limit: 20, status: 'paid' });
+    assert.equal(orders.items[0].order_number, 'ORD-001');
+
+    const tickets = await adminService.listTickets({ page: 1, limit: 20, status: 'open' });
+    assert.equal(tickets.items[0].ticket_code, 'SUP-20261125-ABC123');
+
+    const ticketUpdate = await adminService.updateTicketStatus('SUP-20261125-ABC123', 'resolved');
+    assert.deepEqual(ticketUpdate, { ticketCode: 'SUP-20261125-ABC123', status: 'resolved' });
+
+    await assert.rejects(
+      () => adminService.updateTicketStatus('SUP-MISSING', 'closed'),
+      (err) => err.statusCode === 404 && err.code === 'TICKET_NOT_FOUND'
+    );
   });
 });
