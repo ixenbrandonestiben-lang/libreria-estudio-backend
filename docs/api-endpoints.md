@@ -123,6 +123,7 @@ Todos los endpoints bajo `/api/v1/admin` requieren autenticación JWT (`authMidd
 
 | Método | Ruta | Descripción | Autenticación |
 | :--- | :--- | :--- | :--- |
+| `GET` | `/api/v1/admin/analytics` | Analítica ejecutiva (ingresos, órdenes por estado, top 8 productos, alertas de bajo stock, usuarios y tickets abiertos). | Admin |
 | `GET` | `/api/v1/admin/users` | Lista usuarios paginados sin `password_hash` (`?page`, `?limit`, `?q`). | Admin |
 | `PATCH` | `/api/v1/admin/users/:userId` | Actualiza `{ role?, isActive? }` (impide auto-degradación o auto-desactivación con `400 SELF_ROLE_CHANGE_FORBIDDEN`). | Admin |
 | `GET` | `/api/v1/admin/products` | Lista todos los productos incluyendo inactivos (`?page`, `?limit`, `?q`). | Admin |

@@ -836,4 +836,98 @@ describe('adminService.js', () => {
       (err) => err.statusCode === 404 && err.code === 'TICKET_NOT_FOUND'
     );
   });
+
+  it('getDashboardAnalytics combines sales analytics, low stock alerts, users count, and open tickets', async (t) => {
+    const salesSpy = t.mock.method(orderModel, 'getSalesAnalyticsForAdmin', async () => ({
+      summary: {
+        totalRevenue: 1500.5,
+        totalOrders: 12,
+        averageOrderValue: 166.72,
+        pendingFulfillmentCount: 3
+      },
+      ordersByStatus: [
+        { status: 'paid', count: 5 },
+        { status: 'delivered', count: 4 },
+        { status: 'cancelled', count: 3 }
+      ],
+      topProducts: [
+        {
+          product_id: 1,
+          sku_snapshot: 'CUAD-100',
+          title_snapshot: 'Cuaderno A4',
+          unitsSold: 25,
+          revenue: 1125
+        }
+      ]
+    }));
+
+    const lowStockSpy = t.mock.method(productModel, 'findLowStockForAdmin', async (threshold) => {
+      assert.equal(threshold, 15);
+      return [
+        {
+          id: 7,
+          sku: 'LAP-01',
+          title: 'Lápiz HB',
+          stock_available: 4
+        }
+      ];
+    });
+
+    const usersSpy = t.mock.method(userModel, 'findAllForAdmin', async (filters) => {
+      assert.deepEqual(filters, { page: 1, limit: 1 });
+      return {
+        items: [{ id: 1 }],
+        pagination: { page: 1, limit: 1, total: 42, totalPages: 42 }
+      };
+    });
+
+    const ticketsSpy = t.mock.method(supportModel, 'findAllTicketsForAdmin', async (filters) => {
+      assert.deepEqual(filters, { page: 1, limit: 1, status: 'open' });
+      return {
+        items: [{ id: 10, status: 'open' }],
+        pagination: { page: 1, limit: 1, total: 6, totalPages: 6 }
+      };
+    });
+
+    const analytics = await adminService.getDashboardAnalytics();
+
+    assert.equal(salesSpy.mock.calls.length, 1);
+    assert.equal(lowStockSpy.mock.calls.length, 1);
+    assert.equal(usersSpy.mock.calls.length, 1);
+    assert.equal(ticketsSpy.mock.calls.length, 1);
+
+    assert.deepEqual(analytics, {
+      summary: {
+        totalRevenue: 1500.5,
+        totalOrders: 12,
+        averageOrderValue: 166.72,
+        pendingFulfillmentCount: 3,
+        totalUsers: 42,
+        openTicketsCount: 6,
+        lowStockCount: 1
+      },
+      ordersByStatus: [
+        { status: 'paid', count: 5 },
+        { status: 'delivered', count: 4 },
+        { status: 'cancelled', count: 3 }
+      ],
+      topProducts: [
+        {
+          product_id: 1,
+          sku_snapshot: 'CUAD-100',
+          title_snapshot: 'Cuaderno A4',
+          unitsSold: 25,
+          revenue: 1125
+        }
+      ],
+      lowStockProducts: [
+        {
+          id: 7,
+          sku: 'LAP-01',
+          title: 'Lápiz HB',
+          stock_available: 4
+        }
+      ]
+    });
+  });
 });

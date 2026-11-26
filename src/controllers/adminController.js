@@ -119,6 +119,19 @@ async function updateTicketStatus(req, res, next) {
   }
 }
 
+async function getDashboardAnalytics(req, res, next) {
+  try {
+    const analytics = await adminService.getDashboardAnalytics();
+    return sendSuccess(res, {
+      statusCode: 200,
+      message: 'Analítica ejecutiva obtenida correctamente',
+      data: analytics
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listUsers,
   updateUserRoleAndStatus,
@@ -127,5 +140,6 @@ module.exports = {
   updateProduct,
   listOrders,
   listTickets,
-  updateTicketStatus
+  updateTicketStatus,
+  getDashboardAnalytics
 };

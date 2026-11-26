@@ -93,7 +93,30 @@ const createProductValidator = [
     .optional()
     .isBoolean()
     .withMessage('isActive debe ser booleano')
-    .toBoolean()
+    .toBoolean(),
+  body('attributes')
+    .optional()
+    .isArray({ max: 20 })
+    .withMessage('attributes debe ser un arreglo de máximo 20 elementos'),
+  body('attributes.*.key')
+    .if(body('attributes').exists())
+    .trim()
+    .notEmpty()
+    .withMessage('Cada atributo requiere key')
+    .isLength({ max: 80 })
+    .withMessage('attribute key máximo 80 caracteres'),
+  body('attributes.*.value')
+    .if(body('attributes').exists())
+    .trim()
+    .notEmpty()
+    .withMessage('Cada atributo requiere value')
+    .isLength({ max: 160 })
+    .withMessage('attribute value máximo 160 caracteres'),
+  body('attributes.*.label')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isLength({ max: 160 })
+    .withMessage('attribute label máximo 160 caracteres')
 ];
 
 const updateProductValidator = [
