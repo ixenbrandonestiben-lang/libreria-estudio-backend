@@ -31,4 +31,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 # Comando de inicio
-CMD ["node", "src/server.js"]
+# Aplica migraciones al arrancar (idempotente); RUN_SEED=true carga datos iniciales
+CMD ["sh", "-c", "node src/db/migrate.js && if [ \"$RUN_SEED\" = \"true\" ]; then node src/db/seed.js; fi; exec node src/server.js"]
