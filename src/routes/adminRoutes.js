@@ -19,6 +19,8 @@ const router = express.Router();
 
 router.use(authMiddleware, requireRole(USER_ROLES.ADMIN));
 
+router.get('/analytics', adminController.getDashboardAnalytics);
+
 router.get('/users', listUsersValidator, validateMiddleware, adminController.listUsers);
 router.patch(
   '/users/:userId',

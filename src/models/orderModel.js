@@ -264,6 +264,84 @@ async function findAllForAdmin(filters = {}, conn = null) {
   };
 }
 
+/**
+ * Computes executive sales analytics for the admin dashboard.
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function getSalesAnalyticsForAdmin(conn = null) {
+  const db = conn || getPool();
+
+  const [summaryRows] = await db.execute(
+    `SELECT
+       COALESCE(SUM(CASE WHEN status IN (?, ?, ?, ?) THEN total_amount ELSE 0 END), 0) AS totalRevenue,
+       COUNT(*) AS totalOrders,
+       COALESCE(AVG(CASE WHEN status IN (?, ?, ?, ?) THEN total_amount ELSE NULL END), 0) AS averageOrderValue,
+       COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0) AS pendingFulfillmentCount
+     FROM orders`,
+    [
+      'paid',
+      'processing',
+      'shipped',
+      'delivered',
+      'paid',
+      'processing',
+      'shipped',
+      'delivered',
+      'paid',
+      'processing'
+    ]
+  );
+
+  const summaryRow = summaryRows[0] || {};
+  const summary = {
+    totalRevenue: Number(Number(summaryRow.totalRevenue || 0).toFixed(2)),
+    totalOrders: Number(summaryRow.totalOrders || 0),
+    averageOrderValue: Number(Number(summaryRow.averageOrderValue || 0).toFixed(2)),
+    pendingFulfillmentCount: Number(summaryRow.pendingFulfillmentCount || 0)
+  };
+
+  const [statusRows] = await db.execute(
+    `SELECT status, COUNT(*) AS count
+     FROM orders
+     GROUP BY status
+     ORDER BY count DESC`
+  );
+  const ordersByStatus = statusRows.map((row) => ({
+    status: row.status,
+    count: Number(row.count || 0)
+  }));
+
+  const [topProductRows] = await db.execute(
+    `SELECT
+       oi.product_id,
+       MAX(oi.sku_snapshot) AS sku_snapshot,
+       MAX(oi.title_snapshot) AS title_snapshot,
+       SUM(oi.quantity) AS unitsSold,
+       SUM(oi.line_total) AS revenue
+     FROM order_items oi
+     INNER JOIN orders o ON o.id = oi.order_id
+     WHERE o.status NOT IN (?, ?)
+     GROUP BY oi.product_id
+     ORDER BY unitsSold DESC, revenue DESC
+     LIMIT ?`,
+    ['cancelled', 'refunded', '8']
+  );
+
+  const topProducts = topProductRows.map((row) => ({
+    product_id: row.product_id,
+    sku_snapshot: row.sku_snapshot,
+    title_snapshot: row.title_snapshot,
+    unitsSold: Number(row.unitsSold || 0),
+    revenue: Number(Number(row.revenue || 0).toFixed(2))
+  }));
+
+  return {
+    summary,
+    ordersByStatus,
+    topProducts
+  };
+}
+
 module.exports = {
   ALLOWED_ORDER_STATUSES,
   createOrder,
@@ -274,5 +352,6 @@ module.exports = {
   findByOrderNumberAndUserId,
   findForTracking,
   updateStatus,
-  findAllForAdmin
+  findAllForAdmin,
+  getSalesAnalyticsForAdmin
 };
