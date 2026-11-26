@@ -2,6 +2,8 @@
 
 API REST de **Librería Estudio**, plataforma de comercio electrónico especializada en útiles escolares, papelería técnica y textos de estudio. Está construida sobre **Node.js 20**, **Express** y **MySQL 8.0** con una arquitectura modular de **5 capas**, cotizador inteligente de listas escolares, reservas atómicas de inventario y checkout transaccional ACID.
 
+> **Repositorio Frontend relacionado:** [libreria-estudio-frontend](https://github.com/ixenbrandonestiben-lang/libreria-estudio-frontend) · **Sitio en vivo (GitHub Pages):** https://ixenbrandonestiben-lang.github.io/libreria-estudio-frontend/
+
 ---
 
 ## Stack tecnológico
