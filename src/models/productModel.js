@@ -1,4 +1,4 @@
-const { getPool } = require('../config/database');
+const { getPool, getConnection } = require('../config/database');
 
 const ALLOWED_SORT_MAP = Object.freeze({
   newest: 'p.created_at DESC',
@@ -387,36 +387,116 @@ async function findByIdForAdmin(productId, conn = null) {
 }
 
 /**
- * Creates a new product in the catalog.
+ * Lists active products with low available stock for admin alerts.
+ * @param {number} [threshold=15]
+ * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
+ */
+async function findLowStockForAdmin(threshold = 15, conn = null) {
+  const db = conn || getPool();
+  const parsedThreshold = Number.parseInt(threshold, 10);
+  const safeThreshold = Number.isNaN(parsedThreshold) ? 15 : Math.max(0, parsedThreshold);
+
+  const [rows] = await db.execute(
+    `SELECT
+       p.id, p.sku, p.title, p.slug, p.price,
+       p.stock_available, p.stock_reserved,
+       c.name AS category_name, b.name AS brand_name
+     FROM products p
+     INNER JOIN categories c ON c.id = p.category_id
+     INNER JOIN brands b ON b.id = p.brand_id
+     WHERE p.is_active = 1 AND p.stock_available <= ?
+     ORDER BY p.stock_available ASC, p.id ASC
+     LIMIT ?`,
+    [safeThreshold, '10']
+  );
+
+  return rows;
+}
+
+/**
+ * Inserts product technical attributes inside a transaction/connection.
+ * @param {number} productId
+ * @param {Array<{ key: string, value: string, label?: string }>} attributes
+ * @param {import('mysql2/promise').PoolConnection} db
+ */
+async function insertProductAttributes(productId, attributes, db) {
+  for (const attr of attributes) {
+    if (!attr || !attr.key || attr.value === undefined || attr.value === null) {
+      continue;
+    }
+    const key = String(attr.key).trim();
+    const value = String(attr.value).trim();
+    const label = attr.label ? String(attr.label).trim() : `${key}: ${value}`;
+    if (!key || !value) {
+      continue;
+    }
+
+    await db.execute(
+      `INSERT INTO product_attributes (product_id, attribute_key, attribute_value, display_label)
+       VALUES (?, ?, ?, ?)`,
+      [productId, key, value, label]
+    );
+  }
+}
+
+/**
+ * Creates a new product in the catalog with optional technical attributes inside a transaction.
  * @param {object} data
  * @param {import('mysql2/promise').PoolConnection|null} [conn=null]
  */
 async function createProduct(data, conn = null) {
-  const db = conn || getPool();
-  const [result] = await db.execute(
-    `INSERT INTO products (
-       category_id, brand_id, sku, isbn, title, slug, short_description,
-       unit_label, units_per_pack, price, stock_available, stock_reserved,
-       image_url, is_active
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-    [
-      data.categoryId,
-      data.brandId,
-      data.sku,
-      data.isbn || null,
-      data.title,
-      data.slug,
-      data.shortDescription,
-      data.unitLabel || 'unidad',
-      data.unitsPerPack !== undefined ? data.unitsPerPack : 1,
-      data.price,
-      data.stockAvailable !== undefined ? data.stockAvailable : 0,
-      data.imageUrl || null,
-      data.isActive !== undefined ? (data.isActive ? 1 : 0) : 1
-    ]
-  );
+  const attributes = Array.isArray(data.attributes) ? data.attributes : [];
+  const hasAttributes = attributes.length > 0;
+  const ownConnection = !conn && hasAttributes;
+  const db = conn || (ownConnection ? await getConnection() : getPool());
 
-  return findByIdForAdmin(result.insertId, conn);
+  if (ownConnection) {
+    await db.beginTransaction();
+  }
+
+  try {
+    const [result] = await db.execute(
+      `INSERT INTO products (
+         category_id, brand_id, sku, isbn, title, slug, short_description,
+         unit_label, units_per_pack, price, stock_available, stock_reserved,
+         image_url, is_active
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+      [
+        data.categoryId,
+        data.brandId,
+        data.sku,
+        data.isbn || null,
+        data.title,
+        data.slug,
+        data.shortDescription,
+        data.unitLabel || 'unidad',
+        data.unitsPerPack !== undefined ? data.unitsPerPack : 1,
+        data.price,
+        data.stockAvailable !== undefined ? data.stockAvailable : 0,
+        data.imageUrl || null,
+        data.isActive !== undefined ? (data.isActive ? 1 : 0) : 1
+      ]
+    );
+
+    if (hasAttributes) {
+      await insertProductAttributes(result.insertId, attributes, db);
+    }
+
+    if (ownConnection) {
+      await db.commit();
+    }
+
+    return findByIdForAdmin(result.insertId, conn || (ownConnection ? db : null));
+  } catch (err) {
+    if (ownConnection) {
+      await db.rollback();
+    }
+    throw err;
+  } finally {
+    if (ownConnection) {
+      db.release();
+    }
+  }
 }
 
 /**
@@ -480,6 +560,7 @@ module.exports = {
   findCandidatesForSchoolList,
   findAllForAdmin,
   findByIdForAdmin,
+  findLowStockForAdmin,
   createProduct,
   updateProduct
 };

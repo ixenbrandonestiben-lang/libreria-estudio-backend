@@ -53,6 +53,16 @@ async function createProduct(data) {
     isActive: data.isActive !== undefined ? Boolean(data.isActive) : true
   };
 
+  if (Array.isArray(data.attributes)) {
+    payload.attributes = data.attributes
+      .filter((attr) => attr && attr.key && attr.value !== undefined && attr.value !== null)
+      .map((attr) => ({
+        key: cleanText(attr.key),
+        value: cleanText(attr.value),
+        label: attr.label ? cleanText(attr.label) : undefined
+      }));
+  }
+
   return productModel.createProduct(payload);
 }
 
@@ -103,6 +113,27 @@ async function updateTicketStatus(ticketCode, status) {
   return { ticketCode: cleanCode, status };
 }
 
+async function getDashboardAnalytics() {
+  const [salesAnalytics, lowStockProducts, usersResult, openTicketsResult] = await Promise.all([
+    orderModel.getSalesAnalyticsForAdmin(),
+    productModel.findLowStockForAdmin(15),
+    userModel.findAllForAdmin({ page: 1, limit: 1 }),
+    supportModel.findAllTicketsForAdmin({ page: 1, limit: 1, status: 'open' })
+  ]);
+
+  return {
+    summary: {
+      ...salesAnalytics.summary,
+      totalUsers: Number(usersResult?.pagination?.total || 0),
+      openTicketsCount: Number(openTicketsResult?.pagination?.total || 0),
+      lowStockCount: Array.isArray(lowStockProducts) ? lowStockProducts.length : 0
+    },
+    ordersByStatus: salesAnalytics.ordersByStatus,
+    topProducts: salesAnalytics.topProducts,
+    lowStockProducts
+  };
+}
+
 module.exports = {
   listUsers,
   updateUserRoleAndStatus,
@@ -111,5 +142,6 @@ module.exports = {
   updateProduct,
   listOrders,
   listTickets,
-  updateTicketStatus
+  updateTicketStatus,
+  getDashboardAnalytics
 };
