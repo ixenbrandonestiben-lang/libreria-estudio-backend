@@ -14,6 +14,17 @@ async function runSeeds() {
       logger.info('Seed ejecutado correctamente', { filename: seed.filename });
     }
 
+    const bootstrapAdminEmail = String(process.env.BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase();
+    if (bootstrapAdminEmail) {
+      const [result] = await connection.query(
+        "UPDATE users SET role = 'admin', is_active = 1 WHERE email = ?",
+        [bootstrapAdminEmail]
+      );
+      logger.info('Promoción de administrador bootstrap evaluada', {
+        updated: result && typeof result.affectedRows === 'number' ? result.affectedRows : 0
+      });
+    }
+
     logger.info('Carga inicial de datos completada', { totalFiles: seeds.length });
   } finally {
     await connection.end();
